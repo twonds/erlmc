@@ -26,7 +26,7 @@
 %% @doc a binary protocol memcached client
 -module(erlmc_recv).
 
--export([start_link/2]).
+-export([start_link/2, loop/2]).
 -include("erlmc.hrl").
 
 start_link(Socket, ReplyCallback) ->
