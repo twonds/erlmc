@@ -79,7 +79,7 @@ handle_call({get, Key}, _From, Socket) ->
 	end;
     
 handle_call({add, Key, Value, Expiration}, _From, Socket) ->
-    case send_recv(Socket, #request{op_code=?OP_Add, extras = <<16#deadbeef:32, Expiration:32>>, key=list_to_binary(Key), value=Value}) of
+    case send_recv(Socket, #request{op_code=?OP_Add, extras = <<0:32, Expiration:32>>, key=list_to_binary(Key), value=Value}) of
 		{error, Err} ->
 			{stop, Err, {error, Err}, Socket};
 		Resp ->
@@ -87,7 +87,7 @@ handle_call({add, Key, Value, Expiration}, _From, Socket) ->
 	end;
     
 handle_call({set, Key, Value, Expiration}, _From, Socket) ->
-	case send_recv(Socket, #request{op_code=?OP_Set, extras = <<16#deadbeef:32, Expiration:32>>, key=list_to_binary(Key), value=Value}) of
+	case send_recv(Socket, #request{op_code=?OP_Set, extras = <<0:32, Expiration:32>>, key=list_to_binary(Key), value=Value}) of
 		{error, Err} ->
 			{stop, Err, {error, Err}, Socket};
 		Resp ->
@@ -95,7 +95,7 @@ handle_call({set, Key, Value, Expiration}, _From, Socket) ->
 	end;
 
 handle_call({replace, Key, Value, Expiration}, _From, Socket) ->
-	case send_recv(Socket, #request{op_code=?OP_Replace, extras = <<16#deadbeef:32, Expiration:32>>, key=list_to_binary(Key), value=Value}) of
+	case send_recv(Socket, #request{op_code=?OP_Replace, extras = <<0:32, Expiration:32>>, key=list_to_binary(Key), value=Value}) of
 		{error, Err} ->
 			{stop, Err, {error, Err}, Socket};
 		Resp ->
