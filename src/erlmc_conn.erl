@@ -33,6 +33,9 @@
 -export([start_link/1, init/1, handle_call/3, handle_cast/2, 
 	     handle_info/2, terminate/2, code_change/3]).
 
+-record(state, {socket,
+		requesters = queue:new()}).
+
 %% API functions
 start_link([Host, Port]) ->
 	gen_server:start_link(?MODULE, [Host, Port], []).
@@ -50,11 +53,16 @@ start_link([Host, Port]) ->
 %% @hidden
 %%--------------------------------------------------------------------
 init([Host, Port]) ->
-	case gen_tcp:connect(Host, Port, [binary, {packet, 0}, {active, false}]) of
+    I = self(),
+    case gen_tcp:connect(Host, Port, [binary, {packet, 0}, {active, false}]) of
         {ok, Socket} -> 
-			{ok, Socket};
+	    erlmc_recv:start_link(Socket,
+				  fun(Reply) ->
+					  gen_server:cast(I, {reply, Reply})
+				  end),
+	    {ok, #state{socket = Socket}};
         Error -> 
-			exit(Error)
+	    exit(Error)
     end.
 
 %%--------------------------------------------------------------------
@@ -67,138 +75,10 @@ init([Host, Port]) ->
 %% Description: Handling call messages
 %% @hidden
 %%--------------------------------------------------------------------    
-handle_call({get, Key}, _From, Socket) ->
-    case send_recv(Socket,
-		   #request{op_code=?OP_GetK, key=Key}) of
-	{error, Err} ->
-	    {stop, Err, {error, Err}, Socket};
-	#response{key=Key1, value=Value} when Key == Key1 ->
-	    {reply, Value, Socket};
-	#response{} ->
-	    {reply, <<>>, Socket}
-    end;
+handle_call({req, Req}, From, #state{socket = Socket} = State) ->
+    send(Socket, Req),
+    {noreply, State#state{requesters = queue:in(From, State#state.requesters)}}.
     
-handle_call({add, Key, Value, Expiration}, _From, Socket) ->
-    case send_recv(Socket,
-		   #request{op_code=?OP_Add, extras = <<0:32, Expiration:32>>,
-			    key=Key, value=Value}) of
-	{error, Err} ->
-	    {stop, Err, {error, Err}, Socket};
-	Resp ->
-	    {reply, Resp#response.value, Socket}
-    end;
-    
-handle_call({set, Key, Value, Expiration}, _From, Socket) ->
-	case send_recv(Socket,
-		       #request{op_code=?OP_Set, extras = <<0:32, Expiration:32>>,
-				key=Key, value=Value}) of
-	    {error, Err} ->
-		{stop, Err, {error, Err}, Socket};
-	    Resp ->
-    		{reply, Resp#response.value, Socket}
-	end;
-
-handle_call({replace, Key, Value, Expiration}, _From, Socket) ->
-    case send_recv(Socket,
-		   #request{op_code=?OP_Replace, extras = <<0:32, Expiration:32>>,
-			    key=Key, value=Value}) of
-	{error, Err} ->
-	    {stop, Err, {error, Err}, Socket};
-	Resp ->
-	    {reply, Resp#response.value, Socket}
-    end;
-
-handle_call({delete, Key}, _From, Socket) ->
-    case send_recv(Socket,
-		   #request{op_code=?OP_Delete, key=Key}) of
-	{error, Err} ->
-	    {stop, Err, {error, Err}, Socket};
-	Resp ->
-	    {reply, Resp#response.value, Socket}
-    end;
-
-handle_call({increment, Key, Value, Initial, Expiration}, _From, Socket) ->
-    case send_recv(Socket,
-		   #request{op_code=?OP_Increment,
-			    extras = <<Value:64, Initial:64, Expiration:32>>,
-			    key=Key}) of
-	{error, Err} ->
-	    {stop, Err, {error, Err}, Socket};
-	Resp ->
-	    {reply, Resp#response.value, Socket}
-    end;
-	
-handle_call({decrement, Key, Value, Initial, Expiration}, _From, Socket) ->
-    case send_recv(Socket,
-		   #request{op_code=?OP_Decrement,
-			    extras = <<Value:64, Initial:64, Expiration:32>>,
-			    key=Key}) of
-	{error, Err} ->
-	    {stop, Err, {error, Err}, Socket};
-	Resp ->
-	    {reply, Resp#response.value, Socket}
-    end;
-
-handle_call({append, Key, Value}, _From, Socket) ->
-    case send_recv(Socket, #request{op_code=?OP_Append,
-				    key=Key,
-				    value=Value}) of
-	{error, Err} ->
-	    {stop, Err, {error, Err}, Socket};
-	Resp ->
-	    {reply, Resp#response.value, Socket}
-    end;
-
-handle_call({prepend, Key, Value}, _From, Socket) ->
-    case send_recv(Socket,
-		   #request{op_code=?OP_Prepend,
-			    key=Key, value=Value}) of
-	{error, Err} ->
-	    {stop, Err, {error, Err}, Socket};
-	Resp ->
-	    {reply, Resp#response.value, Socket}
-    end;
-	
-handle_call(stats, _From, Socket) ->
-	send(Socket, #request{op_code=?OP_Stat}),
-    case collect_stats_from_socket(Socket) of
-		{error, Err} ->
-			{stop, Err, {error, Err}, Socket};
-		Reply ->
-    		{reply, Reply, Socket}
-	end;
-
-handle_call(flush, _From, Socket) ->
-	case send_recv(Socket, #request{op_code=?OP_Flush}) of
-		{error, Err} ->
-			{stop, Err, {error, Err}, Socket};
-		Resp ->
-    		{reply, Resp#response.value, Socket}
-	end;
-        
-handle_call({flush, Expiration}, _From, Socket) ->
-	case send_recv(Socket, #request{op_code=?OP_Flush, extras = <<Expiration:32>>}) of
-		{error, Err} ->
-			{stop, Err, {error, Err}, Socket};
-		Resp ->
-    		{reply, Resp#response.value, Socket}
-	end;
-    
-handle_call(quit, _From, Socket) ->
-	send_recv(Socket, #request{op_code=?OP_Quit}),
-	gen_tcp:close(Socket),
-    {stop, shutdown, undefined};
-    
-handle_call(version, _From, Socket) ->
-	case send_recv(Socket, #request{op_code=?OP_Version}) of
-		{error, Err} ->
-			{stop, Err, {error, Err}, Socket};
-		Resp ->
-    		{reply, Resp#response.value, Socket}
-	end;
-	
-handle_call(_, _From, Socket) -> {reply, {error, invalid_call}, Socket}.
-
 %%--------------------------------------------------------------------
 %% Function: handle_cast(Msg, State) -> {noreply, State} |
 %%                                      {noreply, State, Timeout} |
@@ -206,7 +86,10 @@ handle_call(_, _From, Socket) -> {reply, {error, invalid_call}, Socket}.
 %% Description: Handling cast messages
 %% @hidden
 %%--------------------------------------------------------------------
-handle_cast(_Message, State) -> {noreply, State}.
+handle_cast({reply, Reply}, #state{requesters = Requesters1} = State) ->
+    {{value, From}, Requesters2} = queue:out(Requesters1),
+    gen_server:reply(From, {reply, Reply}),
+    {noreply, State#state{requesters = Requesters2}}.
 
 %%--------------------------------------------------------------------
 %% Function: handle_info(Info, State) -> {noreply, State} |
@@ -241,35 +124,10 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------     
-collect_stats_from_socket(Socket) ->
-    collect_stats_from_socket(Socket, []).
-    
-collect_stats_from_socket(Socket, Acc) ->
-    case recv(Socket) of
-		{error, Err} -> 
-			{error, Err};
-        #response{body_size=0} ->
-            Acc;
-        #response{key=Key, value=Value} ->
-            collect_stats_from_socket(Socket, [{binary_to_atom(Key, utf8), binary_to_list(Value)}|Acc])
-    end.
-
-send_recv(Socket, Request) ->
-    ok = send(Socket, Request),
-    recv(Socket).
-    
 send(Socket, Request) ->
     Bin = encode_request(Request),
     gen_tcp:send(Socket, Bin).
 
-recv(Socket) ->
-    case recv_header(Socket) of
-		{error, Err} ->
-			{error, Err};
-		HdrResp ->
-    		recv_body(Socket, HdrResp)
-    end.
-        
 encode_request(Request) when is_record(Request, request) ->
     Magic = 16#80,
     Opcode = Request#request.op_code,
@@ -284,37 +142,3 @@ encode_request(Request) when is_record(Request, request) ->
     CAS = Request#request.cas,
     <<Magic:8, Opcode:8, KeySize:16, ExtrasSize:8, DataType:8, Reserved:16, BodySize:32, Opaque:32, CAS:64, Body:BodySize/binary>>.
 
-recv_header(Socket) ->
-    decode_response_header(recv_bytes(Socket, 24)).
-  
-recv_body(Socket, #response{key_size = KeySize, extras_size = ExtrasSize, body_size = BodySize}=Resp) ->
-    decode_response_body(recv_bytes(Socket, BodySize), ExtrasSize, KeySize, Resp).
-    
-decode_response_header({error, Err}) -> {error, Err};
-decode_response_header(<<16#81:8, Opcode:8, KeySize:16, ExtrasSize:8, DataType:8, Status:16, BodySize:32, Opaque:32, CAS:64>>) ->
-    #response{
-        op_code = Opcode, 
-        data_type = DataType, 
-        status = Status, 
-        opaque = Opaque, 
-        cas = CAS, 
-        key_size = KeySize,
-        extras_size = ExtrasSize,
-        body_size = BodySize
-    }.
-    
-decode_response_body({error, Err}, _, _, _) -> {error, Err};
-decode_response_body(Bin, ExtrasSize, KeySize, Resp) ->
-    <<Extras:ExtrasSize/binary, Key:KeySize/binary, Value/binary>> = Bin,
-    Resp#response{
-        extras = Extras,
-        key = Key,
-        value = Value
-    }.
-
-recv_bytes(_, 0) -> <<>>;
-recv_bytes(Socket, NumBytes) ->
-    case gen_tcp:recv(Socket, NumBytes) of
-        {ok, Bin} -> Bin;
-        Err -> Err
-    end.
