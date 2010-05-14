@@ -27,7 +27,7 @@
 -module(erlmc).
 
 %% api callbacks
--export([get/1, add/2, add/3, set/2, set/3, 
+-export([get/1, add/2, add/3, set/2, set/3, set/4,
 		 replace/2, replace/3, delete/1, increment/4, decrement/4,
 		 append/2, prepend/2]).
 
@@ -52,12 +52,16 @@ add(Key, Value, Expiration)
 		       value = Value}).
 
 set(Key, Value) ->
-    set(Key, Value, 0).
-	
-set(Key, Value, Expiration)
+    set(Key, Value, 0, 0).
+
+set(Key, Value, Expiration) ->
+    set(Key, Value, Expiration, 0).
+
+set(Key, Value, Expiration, CAS)
   when is_binary(Value), is_integer(Expiration) ->
     call_pool(#request{op_code = ?OP_Set,
 		       extras = <<0:32, Expiration:32>>,
+		       cas = CAS,
 		       key = Key,
 		       value = Value}).
 
@@ -100,8 +104,8 @@ prepend(Key, Value) when is_binary(Value) ->
 call_pool(Req) ->
     {ok, Conn} = erlmc_pool_sup:next_conn(),
     case gen_server:call(Conn, {req, Req}) of
-	{reply, #response{status = ?STATUS_OK, value = Value}} ->
-	    {ok, Value};
+	{reply, #response{status = ?STATUS_OK, value = Value, cas = CAS}} ->
+	    {ok, Value, CAS};
 	{reply, #response{status = Status}} ->
 	    {error, status_id(Status)};
 	{error, Reason} ->
