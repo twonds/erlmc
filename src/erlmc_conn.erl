@@ -61,8 +61,8 @@ init([Host, Port]) ->
 					  gen_server:cast(I, {reply, Reply})
 				  end),
 	    {ok, #state{socket = Socket}};
-        Error -> 
-	    exit(Error)
+        {error, Error} -> 
+	    {error, Error}
     end.
 
 %%--------------------------------------------------------------------
