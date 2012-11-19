@@ -1,5 +1,5 @@
-%% Copyright (c) 2009 
-%% Jacob Vorreuter <jacob.vorreuter@gmail.com>
+%% Copyright (c) 2010
+%% Stephan Maka <stephan@spaceboyz.net>
 %%
 %% Permission is hereby granted, free of charge, to any person
 %% obtaining a copy of this software and associated documentation
@@ -26,15 +26,10 @@
 %% @doc a binary protocol memcached client
 -module(erlmc).
 
--export([start/0, start/1, start_link/0, start_link/1, init/2,
-		 add_server/3, remove_server/2, refresh_server/3, has_server/2,
-         add_connection/2, remove_connection/2]).
-
 %% api callbacks
--export([get/1, get_many/1, add/2, add/3, set/2, set/3, 
+-export([get/1, add/2, add/3, set/2, set/3, set/4,
 		 replace/2, replace/3, delete/1, increment/4, decrement/4,
-		 append/2, prepend/2, stats/0, stats/2, flush/0, flush/1, quit/0, 
-		 version/0]).
+		 append/2, prepend/2]).
 
 -include("erlmc.hrl").
 
@@ -43,300 +38,85 @@
 %%--------------------------------------------------------------------
 %%% API
 %%--------------------------------------------------------------------
-start() -> start([{"localhost", 11211, 1}]).
-start(CacheServers) when is_list(CacheServers) ->
-	random:seed(now()),
-	case proc_lib:start(?MODULE, init, [self(), CacheServers], 5000) of
-		{ok, _Pid} -> ok;
-		Error -> Error
-	end.
-	
-start_link() -> start_link([{"localhost", 11211, 1}]).
-start_link(CacheServers) when is_list(CacheServers) ->
-	random:seed(now()),
-	proc_lib:start_link(?MODULE, init, [self(), CacheServers], 5000).
-	
-add_server(Host, Port, PoolSize) ->
-	erlang:send(?MODULE, {add_server, Host, Port, PoolSize}),
-	ok.
-	
-refresh_server(Host, Port, PoolSize) ->
-    erlang:send(?MODULE, {refresh_server, Host, Port, PoolSize}),
-    ok.
-    
-remove_server(Host, Port) ->
-	erlang:send(?MODULE, {remove_server, Host, Port}),
-	ok.
+get(Key) ->
+    call_pool(#request{op_code=?OP_GetK, key=Key}).
 
-has_server(Host, Port) ->
-    erlang:send(?MODULE, {has_server, self(), Host, Port}),
-    
-    receive
-        {has_server_result, B} when is_boolean(B) -> B
-    after
-        5000 -> unknown
-    end.
-
-add_connection(Host, Port) ->
-	erlang:send(?MODULE, {add_connection, Host, Port}),
-	ok.
-	
-remove_connection(Host, Port) ->
-	erlang:send(?MODULE, {remove_connection, Host, Port}),
-	ok.
-	
-get(Key0) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {get, Key}, ?TIMEOUT).
-
-get_many(Keys) ->
-	Self = self(),
-	Pids = [spawn(fun() -> 
-		Res = (catch ?MODULE:get(Key)),
-		Self ! {self(), {Key, Res}}
-	 end) || Key <- Keys],
-	lists:reverse(lists:foldl(
-		fun(Pid, Acc) ->
-			receive
-				{Pid, {Key, Res}} -> [{Key, Res}|Acc]
-			after ?TIMEOUT ->
-				Acc
-			end
-		end, [], Pids)).
-    
 add(Key, Value) ->
-	add(Key, Value, 0).
+    add(Key, Value, 0).
 	
-add(Key0, Value, Expiration) when is_binary(Value), is_integer(Expiration) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {add, Key, Value, Expiration}, ?TIMEOUT).
+add(Key, Value, Expiration)
+  when is_binary(Value), is_integer(Expiration) ->
+    call_pool(#request{op_code = ?OP_Add,
+		       extras = <<0:32, Expiration:32>>,
+		       key = Key,
+		       value = Value}).
 
 set(Key, Value) ->
-	set(Key, Value, 0).
-	
-set(Key0, Value, Expiration) when is_binary(Value), is_integer(Expiration) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {set, Key, Value, Expiration}, ?TIMEOUT).
-    
+    set(Key, Value, 0, 0).
+
+set(Key, Value, Expiration) ->
+    set(Key, Value, Expiration, 0).
+
+set(Key, Value, Expiration, CAS)
+  when is_binary(Value), is_integer(Expiration) ->
+    call_pool(#request{op_code = ?OP_Set,
+		       extras = <<0:32, Expiration:32>>,
+		       cas = CAS,
+		       key = Key,
+		       value = Value}).
+
 replace(Key, Value) ->
-	replace(Key, Value, 0).
+    replace(Key, Value, 0).
 	
-replace(Key0, Value, Expiration) when is_binary(Value), is_integer(Expiration) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {replace, Key, Value, Expiration}, ?TIMEOUT).
+replace(Key, Value, Expiration)
+  when is_binary(Value), is_integer(Expiration) ->
+    call_pool(#request{op_code = ?OP_Replace,
+		       extras = <<0:32, Expiration:32>>,
+		       key = Key,
+		       value = Value}).
     
-delete(Key0) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {delete, Key}, ?TIMEOUT).
+delete(Key) ->
+    call_pool(#request{op_code = ?OP_Delete,
+		       key = Key}).
 
-increment(Key0, Value, Initial, Expiration) when is_binary(Value), is_binary(Initial), is_integer(Expiration) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {increment, Key, Value, Initial, Expiration}, ?TIMEOUT).
+increment(Key, Value, Initial, Expiration)
+  when is_binary(Value), is_binary(Initial), is_integer(Expiration) ->
+    call_pool(#request{op_code = ?OP_Increment,
+		       extras = <<Value:64, Initial:64, Expiration:32>>,
+		       key = Key}).
 
-decrement(Key0, Value, Initial, Expiration) when is_binary(Value), is_binary(Initial), is_integer(Expiration) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {decrement, Key, Value, Initial, Expiration}, ?TIMEOUT).
+decrement(Key, Value, Initial, Expiration)
+  when is_binary(Value), is_binary(Initial), is_integer(Expiration) ->
+    call_pool(#request{op_code=?OP_Decrement,
+		       extras = <<Value:64, Initial:64, Expiration:32>>,
+		       key = Key}).
 
-append(Key0, Value) when is_binary(Value) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {append, Key, Value}, ?TIMEOUT).
+append(Key, Value) when is_binary(Value) ->
+    call_pool(#request{op_code = ?OP_Append,
+		       key = Key,
+		       value = Value}).
 
-prepend(Key0, Value) when is_binary(Value) ->
-	Key = package_key(Key0),
-    call(map_key(Key), {prepend, Key, Value}, ?TIMEOUT).
+prepend(Key, Value) when is_binary(Value) ->
+    call_pool(#request{op_code = ?OP_Prepend,
+		       key = Key,
+		       value = Value}).
 
-stats() ->
-	multi_call(stats).
-
-stats(Host, Port) ->
-    host_port_call(Host, Port, stats).
-
-flush() ->
-    multi_call(flush).
-    
-flush(Expiration) when is_integer(Expiration) ->
-    multi_call({flush, Expiration}).
-    
-quit() ->
-	[begin
-		{Key, [
-			{'EXIT',{shutdown,{gen_server,call,[Pid,quit,?TIMEOUT]}}} == 
-				(catch gen_server:call(Pid, quit, ?TIMEOUT)) || Pid <- Pids]}
-	 end || {Key, Pids} <- unique_connections()].
-    
-version() ->
-    multi_call(version).
-
-multi_call(Msg) ->
-	[begin
-		Pid = lists:nth(random:uniform(length(Pids)), Pids),
-		{{Host, Port}, gen_server:call(Pid, Msg, ?TIMEOUT)}
-	end || {{Host, Port}, Pids} <- unique_connections()].
-
-host_port_call(Host, Port, Msg) ->
-    Pid = unique_connection(Host, Port),
-    gen_server:call(Pid, Msg, ?TIMEOUT).
-
-call(Pid, Msg, Timeout) ->
-	case gen_server:call(Pid, Msg, Timeout) of
-		{error, Error} -> exit({erlmc, Error});
-		Resp -> Resp
-	end.
-	
-%%--------------------------------------------------------------------
-%%% Stateful loop
-%%--------------------------------------------------------------------	
-init(Parent, CacheServers) ->
-	process_flag(trap_exit, true),
-	register(erlmc, self()),
-	ets:new(erlmc_continuum, [ordered_set, protected, named_table]),
-	ets:new(erlmc_connections, [bag, protected, named_table]),
-    
-    %% Continuum = [{uint(), {Host, Port}}]
-	[add_server_to_continuum(Host, Port) || {Host, Port, _} <- CacheServers],
-        
-    %% Connections = [{{Host,Port}, ConnPid}]
-	[begin
-		[start_connection(Host, Port) || _ <- lists:seq(1, ConnPoolSize)]
-	 end || {Host, Port, ConnPoolSize} <- CacheServers],
-        
-	proc_lib:init_ack(Parent, {ok, self()}),
-	
-	loop().
-	
-loop() ->
-	receive
-		{add_server, Host, Port, ConnPoolSize} ->
-			add_server_to_continuum(Host, Port),
-            [start_connection(Host, Port) || _ <- lists:seq(1, ConnPoolSize)];
-        {refresh_server, Host, Port, ConnPoolSize} ->
-            % adding to continuum is idempotent
-            add_server_to_continuum(Host, Port),
-            % add only necessary connections to reach pool size
-            LiveConnections = revalidate_connections(Host, Port),
-            if
-                LiveConnections < ConnPoolSize ->
-                    [start_connection(Host, Port) || _ <- lists:seq(1, ConnPoolSize - LiveConnections)];
-                true ->
-                    ok
-            end;
-		{remove_server, Host, Port} ->
-			[(catch gen_server:call(Pid, quit, ?TIMEOUT)) || [Pid] <- ets:match(erlmc_connections, {{Host, Port}, '$1'})],
-			remove_server_from_continuum(Host, Port);
-        {has_server, CallerPid, Host, Port} ->
-            CallerPid ! {has_server_result, is_server_in_continuum(Host, Port)};
-		{add_connection, Host, Port} ->
-			start_connection(Host, Port);
-		{remove_connection, Host, Port} ->
-			[[Pid]|_] = ets:match(erlmc_connections, {{Host, Port}, '$1'}),
-			(catch gen_server:call(Pid, quit, ?TIMEOUT));
-		{'EXIT', Pid, Err} ->
-			case ets:match(erlmc_connections, {'$1', Pid}) of
-				[[{Host, Port}]] -> 
-					ets:delete_object(erlmc_connections, {{Host, Port}, Pid}),
-					case Err of
-						shutdown -> ok;
-						_ -> start_connection(Host, Port)
-					end;
-				_ -> 
-					ok
-			end
-	end,
-	loop().
-	
-start_connection(Host, Port) ->
-	case erlmc_conn:start_link([Host, Port]) of
-		{ok, Pid} -> ets:insert(erlmc_connections, {{Host, Port}, Pid});
-		_ -> ok
-	end.
-
-revalidate_connections(Host, Port) ->
-    [(catch gen_server:call(Pid, version, ?TIMEOUT)) || [Pid] <- ets:match(erlmc_connections, {{Host, Port}, '$1'})],
-    length(ets:match(erlmc_connections, {{Host, Port}, '$1'})).
-
-%%--------------------------------------------------------------------
-%%% Internal functions
-%%--------------------------------------------------------------------
-add_server_to_continuum(Host, Port) ->
-	[ets:insert(erlmc_continuum, {hash_to_uint(Host ++ integer_to_list(Port) ++ integer_to_list(I)), {Host, Port}}) || I <- lists:seq(1, 100)].
-
-remove_server_from_continuum(Host, Port) ->
-	case ets:match(erlmc_continuum, {'$1', {Host, Port}}) of
-		[] -> 
-			ok;
-		List ->
-			[ets:delete(erlmc_continuum, Key) || [Key] <- List]
-	end.
-
-is_server_in_continuum(Host, Port) ->
-    case ets:match(erlmc_continuum, {'$1', {Host, Port}}) of
-        [] -> 
-            false;
-        _ ->
-            true
+call_pool(Req) ->
+    {ok, Conn} = erlmc_pool_sup:next_conn(),
+    case gen_server:call(Conn, {req, Req}) of
+	{reply, #response{status = ?STATUS_OK, value = Value, cas = CAS}} ->
+	    {ok, Value, CAS};
+	{reply, #response{status = Status}} ->
+	    {error, status_id(Status)};
+	{error, Reason} ->
+	    {error, Reason}
     end.
 
-package_key(Key) when is_atom(Key) ->
-    atom_to_list(Key);
-
-package_key(Key) when is_list(Key) ->
-    Key;
-
-package_key(Key) when is_binary(Key) ->
-    binary_to_list(Key);
-
-package_key(Key) ->
-    lists:flatten(io_lib:format("~p", [Key])).
-
-unique_connections() ->
-	dict:to_list(lists:foldl(
-		fun({Key, Val}, Dict) ->
-			dict:append_list(Key, [Val], Dict)
-		end, dict:new(), ets:tab2list(erlmc_connections))).
-
-unique_connection(Host, Port) ->
-    case ets:lookup(erlmc_connections, {Host, Port}) of
-        [] -> exit({erlmc, {connection_not_found, {Host, Port}}});
-        Pids ->
-            {_, Pid} = lists:nth(random:uniform(length(Pids)), Pids),
-            Pid
-    end.
-
-%% Consistent hashing functions
-%%
-%% First, hash memcached servers to unsigned integers on a continuum. To
-%% map a key to a memcached server, hash the key to an unsigned integer
-%% and locate the next largest integer on the continuum. That integer
-%% represents the hashed server that the key maps to.
-%% reference: http://www8.org/w8-papers/2a-webserver/caching/paper2.html
-hash_to_uint(Key) when is_list(Key) -> 
-    <<Int:128/unsigned-integer>> = erlang:md5(Key), Int.
-
-%% @spec map_key(Key) -> Conn
-%%		 Key = string()
-%%		 Conn = pid()
-map_key(Key) when is_list(Key) ->
-	First = ets:first(erlmc_continuum),
-    {Host, Port} = 
-		case find_next_largest(hash_to_uint(Key), First) of
-			undefined ->
-				case First of
-					'$end_of_table' -> exit(erlmc_continuum_empty);
-					_ ->
-						[{_, Value}] = ets:lookup(erlmc_continuum, First),
-						Value
-				end;
-			Value -> Value
-		end,
-	unique_connection(Host, Port).
-    
-%% @todo: use sorting algorithm to find next largest
-find_next_largest(_, '$end_of_table') -> 
-	undefined;
-
-find_next_largest(Int, Key) when Key > Int ->
-	[{_, Val}] = ets:lookup(erlmc_continuum, Key),
-	Val;
-	
-find_next_largest(Int, Key) ->
-	find_next_largest(Int, ets:next(erlmc_continuum, Key)).
+status_id(0) -> ok;
+status_id(1) -> not_found;
+status_id(2) -> exists;
+status_id(3) -> too_large;
+status_id(4) -> invalid_arg;
+status_id(5) -> not_stored;
+status_id(6) -> non_numeric;
+status_id(_) -> unknown.
