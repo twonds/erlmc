@@ -1,21 +1,21 @@
-LIBDIR=`erl -eval 'io:format("~s~n", [code:lib_dir()])' -s init stop -noshell`
-VERSION=0.2
-PKGNAME=erlmc
+.PHONY: deps doc
 
-all: emake
+all: deps compile
 
-emake: app
-	erl -make
-	
-app:
-	sh ebin/$(PKGNAME).app.in $(VERSION)
+compile:
+	./rebar compile
 
-test: all
-	prove t/*.t
+deps:
+	./rebar get-deps
 
 clean:
-	rm -rf erl_crash.dump ebin/*.beam ebin/*.app
+	./rebar clean
 
-install:
-	mkdir -p $(prefix)/$(LIBDIR)/$(PKGNAME)-$(VERSION)/{ebin,include}
-	for i in ebin/*.beam ebin/*.app include/*.hrl; do install $$i $(prefix)/$(LIBDIR)/$(PKGNAME)-$(VERSION)/$$i ; done
+distclean: clean
+	./rebar delete-deps
+
+test: 
+	./rebar eunit
+
+dialyzer: compile
+	@dialyzer -Wno_return -c ebin
